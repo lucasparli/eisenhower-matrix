@@ -61,6 +61,8 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QCalendarWidget,
     QTableView,
+    QTableWidget,
+    QTableWidgetItem,
 )
 
 # ---------------- QtCharts ---------------- #
@@ -82,6 +84,7 @@ if not os.path.exists(APP_DIR):
 
 DATA_FILE = os.path.join(APP_DIR, "tasks.json")
 NOTES_FILE = os.path.join(APP_DIR, "notes.json")
+TOPICS_FILE = os.path.join(APP_DIR, "topics.json")
 
 
 
@@ -1756,12 +1759,592 @@ class NotesView(QWidget):
 
         menu.exec(self.text_edit.mapToGlobal(pos))
 
+# ------------------------- Topic Tracker ------------------------- #
+# ---------------------- Topic model ---------------------- #
+
+class Topic:
+    def __init__(
+        self,
+        question,
+        asked_to,
+        asked_at=None,
+        deadline=None,
+        status="open",          # open, waiting, blocked, answered
+        category="",
+        priority="medium",      # low, medium, high
+        channel="",
+        reminder_date=None,
+        tags="",
+        answer="",
+        history="",
+        attachments=None,       # list of file paths or URLs (optional)
+        created_at=None,
+        answered_at=None,
+    ):
+        self.question = question
+        self.asked_to = asked_to
+        self.asked_at = asked_at or datetime.now().isoformat()
+        self.deadline = deadline
+        self.status = status
+        self.category = category
+        self.priority = priority
+        self.channel = channel
+        self.reminder_date = reminder_date
+        self.tags = tags
+        self.answer = answer
+        self.history = history
+        self.attachments = attachments or []
+        self.created_at = created_at or datetime.now().isoformat()
+        self.answered_at = answered_at
+
+    def to_dict(self):
+        return {
+            "question": self.question,
+            "asked_to": self.asked_to,
+            "asked_at": self.asked_at,
+            "deadline": self.deadline,
+            "status": self.status,
+            "category": self.category,
+            "priority": self.priority,
+            "channel": self.channel,
+            "reminder_date": self.reminder_date,
+            "tags": self.tags,
+            "answer": self.answer,
+            "history": self.history,
+            "attachments": self.attachments,
+            "created_at": self.created_at,
+            "answered_at": self.answered_at,
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return Topic(
+            question=d.get("question", ""),
+            asked_to=d.get("asked_to", ""),
+            asked_at=d.get("asked_at"),
+            deadline=d.get("deadline"),
+            status=d.get("status", "open"),
+            category=d.get("category", ""),
+            priority=d.get("priority", "medium"),
+            channel=d.get("channel", ""),
+            reminder_date=d.get("reminder_date"),
+            tags=d.get("tags", ""),
+            answer=d.get("answer", ""),
+            history=d.get("history", ""),
+            attachments=d.get("attachments", []),
+            created_at=d.get("created_at"),
+            answered_at=d.get("answered_at"),
+        )
+
+# ---------------------- Topic Manager ---------------------- #
+
+class TopicManager:
+    def __init__(self):
+        self.topics: list[Topic] = []
+        self.load()
+
+    def load(self):
+        if os.path.exists(TOPICS_FILE):
+            try:
+                with open(TOPICS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.topics = [Topic.from_dict(t) for t in data]
+            except Exception:
+                self.topics = []
+        else:
+            self.topics = []
+
+    def save(self):
+        with open(TOPICS_FILE, "w", encoding="utf-8") as f:
+            json.dump([t.to_dict() for t in self.topics], f, indent=2)
+
+    def add_topic(self, topic: Topic):
+        self.topics.append(topic)
+        self.save()
+
+    def delete_topic(self, topic: Topic):
+        """Remove a topic and save immediately."""
+        if topic in self.topics:
+            self.topics.remove(topic)
+            self.save()
+
+    def all_topics(self):
+        return self.topics
+
+    def open_topics(self):
+        return [t for t in self.topics if t.status != "answered"]
+
+    def closed_topics(self):
+        return [t for t in self.topics if t.status == "answered"]
+
+# ---------------------- Topic Dialog ---------------------- #
+
+class TopicDialog(QDialog):
+    def __init__(self, manager: TopicManager, topic: Topic | None = None, parent=None):
+        super().__init__(parent)
+        self.manager = manager
+        self.topic = topic
+        self.setWindowTitle("Edit Topic" if topic else "New Topic")
+        self.setMinimumWidth(520)
+        self.init_ui()
+
+    # ---------------------- DATE PICKER FACTORY ---------------------- #
+    def make_date_picker(self, initial_iso=None):
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        edit = QDateEdit()
+        edit.setDisplayFormat("dd.MM.yyyy")
+        edit.setCalendarPopup(False)
+        edit.setMinimumHeight(28)
+
+        # Set initial date
+        if initial_iso:
+            try:
+                dt = datetime.fromisoformat(initial_iso)
+                edit.setDate(QDate(dt.year, dt.month, dt.day))
+            except Exception:
+                edit.setDate(QDate.currentDate())
+        else:
+            edit.setDate(QDate.currentDate())
+
+        btn = QPushButton("📅")
+        btn.setFixedWidth(32)
+
+        def open_calendar():
+            dlg = CalendarDialog(self, edit.date())
+            if dlg.exec() == QDialog.Accepted:
+                edit.setDate(dlg.selected_date())
+
+        btn.clicked.connect(open_calendar)
+
+        layout.addWidget(edit)
+        layout.addWidget(btn)
+
+        return container, edit
+
+    # ---------------------- UI SETUP ---------------------- #
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        # Question
+        self.question_edit = QTextEdit()
+        self.question_edit.setFixedHeight(60)
+        form.addRow("Question:", self.question_edit)
+
+        # Asked to
+        self.asked_to_edit = QLineEdit()
+        form.addRow("Asked to:", self.asked_to_edit)
+
+        # Asked at
+        self.asked_at_container, self.asked_at_edit = self.make_date_picker()
+        form.addRow("Asked at:", self.asked_at_container)
+
+        # Deadline
+        self.deadline_container, self.deadline_edit = self.make_date_picker()
+        form.addRow("Deadline:", self.deadline_container)
+
+        # Status
+        self.status_combo = QComboBox()
+        self.status_combo.addItems(["open", "waiting", "blocked", "answered"])
+        form.addRow("Status:", self.status_combo)
+
+        # Category
+        self.category_edit = QLineEdit()
+        form.addRow("Category:", self.category_edit)
+
+        # Priority
+        self.priority_combo = QComboBox()
+        self.priority_combo.addItems(["low", "medium", "high"])
+        form.addRow("Priority:", self.priority_combo)
+
+        # Channel
+        self.channel_edit = QLineEdit()
+        form.addRow("Channel:", self.channel_edit)
+
+        # Reminder
+        self.reminder_container, self.reminder_edit = self.make_date_picker()
+        form.addRow("Reminder:", self.reminder_container)
+
+        # Answer
+        self.answer_edit = QTextEdit()
+        self.answer_edit.setFixedHeight(80)
+        form.addRow("Answer:", self.answer_edit)
+
+        # History
+        self.history_edit = QTextEdit()
+        self.history_edit.setFixedHeight(80)
+        form.addRow("History:", self.history_edit)
+
+        layout.addLayout(form)
+
+        # Buttons
+        btns = QHBoxLayout()
+
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self.save_and_close)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+
+        btns.addStretch()
+        btns.addWidget(save_btn)
+        btns.addWidget(cancel_btn)
+        layout.addLayout(btns)
+
+        # Load existing topic
+        if self.topic:
+            self.load_topic()
+
+    # ---------------------- LOAD EXISTING TOPIC ---------------------- #
+    def load_topic(self):
+        t = self.topic
+        self.question_edit.setPlainText(t.question)
+        self.asked_to_edit.setText(t.asked_to)
+
+        # Set dates
+        def set_date(edit: QDateEdit, iso):
+            if not iso:
+                return
+            try:
+                dt = datetime.fromisoformat(iso)
+                edit.setDate(QDate(dt.year, dt.month, dt.day))
+            except Exception:
+                pass
+
+        set_date(self.asked_at_edit, t.asked_at)
+        set_date(self.deadline_edit, t.deadline)
+        set_date(self.reminder_edit, t.reminder_date)
+
+        self.status_combo.setCurrentText(t.status)
+        self.category_edit.setText(t.category)
+        self.priority_combo.setCurrentText(t.priority)
+        self.channel_edit.setText(t.channel)
+        self.answer_edit.setPlainText(t.answer)
+        self.history_edit.setPlainText(t.history)
+
+    # ---------------------- SAVE ---------------------- #
+    def save_and_close(self):
+        question = self.question_edit.toPlainText().strip()
+        asked_to = self.asked_to_edit.text().strip()
+
+        if not question or not asked_to:
+            QMessageBox.warning(self, "Missing data", "Please fill at least question and 'asked to'.")
+            return
+
+        def to_iso(edit: QDateEdit):
+            d = edit.date()
+            return datetime(d.year(), d.month(), d.day()).isoformat()
+
+        asked_at_iso = to_iso(self.asked_at_edit)
+        deadline_iso = to_iso(self.deadline_edit)
+        reminder_iso = to_iso(self.reminder_edit)
+
+        if self.topic is None:
+            # Create new topic
+            self.topic = Topic(
+                question=question,
+                asked_to=asked_to,
+                asked_at=asked_at_iso,
+                deadline=deadline_iso,
+                status=self.status_combo.currentText(),
+                category=self.category_edit.text().strip(),
+                priority=self.priority_combo.currentText(),
+                channel=self.channel_edit.text().strip(),
+                reminder_date=reminder_iso,
+                answer=self.answer_edit.toPlainText().strip(),
+                history=self.history_edit.toPlainText().strip(),
+            )
+            if self.topic.status == "answered":
+                self.topic.answered_at = datetime.now().isoformat()
+            self.manager.add_topic(self.topic)
+
+        else:
+            # Update existing topic
+            t = self.topic
+            t.question = question
+            t.asked_to = asked_to
+            t.asked_at = asked_at_iso
+            t.deadline = deadline_iso
+            t.status = self.status_combo.currentText()
+            t.category = self.category_edit.text().strip()
+            t.priority = self.priority_combo.currentText()
+            t.channel = self.channel_edit.text().strip()
+            t.reminder_date = reminder_iso
+            t.answer = self.answer_edit.toPlainText().strip()
+            t.history = self.history_edit.toPlainText().strip()
+
+            if t.status == "answered" and not t.answered_at:
+                t.answered_at = datetime.now().isoformat()
+
+            self.manager.save()
+
+        self.accept()
+
+
+# ---------------------- Topics View ---------------------- #
+
+class TopicsView(QWidget):
+    def __init__(self, manager: TopicManager):
+        super().__init__()
+        self.manager = manager
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Title
+        title = QLabel("Topics")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #2980b9; margin-bottom: 6px;")
+        layout.addWidget(title)
+
+        # ---------------------- ACTION BAR ---------------------- #
+        action_bar = QHBoxLayout()
+
+        self.new_btn = QPushButton("➕ New Topic")
+        self.new_btn.clicked.connect(self.new_topic)
+
+        self.refresh_btn = QPushButton("🔄 Refresh")
+        self.refresh_btn.clicked.connect(self.refresh)
+
+        self.delete_btn = QPushButton("🗑️ Delete")
+        self.delete_btn.clicked.connect(self.delete_selected_topic)
+
+        action_bar.addWidget(self.new_btn)
+        action_bar.addWidget(self.refresh_btn)
+        action_bar.addWidget(self.delete_btn)
+        action_bar.addStretch()
+
+        layout.addLayout(action_bar)
+
+        # ---------------------- FILTER BAR (WITH LABELS) ---------------------- #
+        filter_frame = QFrame()
+        filter_frame.setFrameShape(QFrame.StyledPanel)
+        filter_frame.setStyleSheet("background-color: #f7f7f7; border: 1px solid #d0d0d0; border-radius: 6px;")
+
+        filter_layout = QHBoxLayout(filter_frame)
+        filter_layout.setContentsMargins(8, 6, 8, 6)
+        filter_layout.setSpacing(12)
+
+        # Status
+        status_label = QLabel("Status:")
+        self.status_filter = QComboBox()
+        self.status_filter.addItems(["All", "open", "waiting", "blocked", "answered"])
+        self.status_filter.setFixedWidth(120)
+
+        # Category
+        category_label = QLabel("Category:")
+        self.category_filter = QLineEdit()
+        self.category_filter.setPlaceholderText("e.g. Finance")
+
+        # Priority
+        priority_label = QLabel("Priority:")
+        self.priority_filter = QComboBox()
+        self.priority_filter.addItems(["All", "low", "medium", "high"])
+        self.priority_filter.setFixedWidth(100)
+
+        # Asked to
+        person_label = QLabel("Asked to:")
+        self.person_filter = QLineEdit()
+        self.person_filter.setPlaceholderText("Name")
+
+        # Search
+        search_label = QLabel("Search:")
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Question or answer…")
+
+        apply_btn = QPushButton("Filter")
+        apply_btn.clicked.connect(self.refresh)
+
+        # Add widgets to filter bar
+        filter_layout.addWidget(status_label)
+        filter_layout.addWidget(self.status_filter)
+
+        filter_layout.addWidget(category_label)
+        filter_layout.addWidget(self.category_filter)
+
+        filter_layout.addWidget(priority_label)
+        filter_layout.addWidget(self.priority_filter)
+
+        filter_layout.addWidget(person_label)
+        filter_layout.addWidget(self.person_filter)
+
+        filter_layout.addWidget(search_label)
+        filter_layout.addWidget(self.search_edit)
+
+        filter_layout.addWidget(apply_btn)
+
+        layout.addWidget(filter_frame)
+
+        # ---------------------- TABLE ---------------------- #
+        self.table = QTableWidget()
+        self.table.setColumnCount(10)
+        self.table.setHorizontalHeaderLabels([
+            "Question",
+            "Asked to",
+            "Asked at",
+            "Deadline",
+            "Status",
+            "Category",
+            "Priority",
+            "Channel",
+            "Reminder",
+            "Answer",
+        ])
+
+        # Better selection highlight
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setStyleSheet("""
+            QTableWidget::item:selected {
+                background-color: #cce5ff;
+                color: black;
+            }
+        """)
+
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSortingEnabled(True)
+        self.table.doubleClicked.connect(self.edit_selected_topic)
+
+        layout.addWidget(self.table)
+
+        self.refresh()
+
+    # ---------------------- FILTERING ---------------------- #
+    def filtered_topics(self):
+        status = self.status_filter.currentText()
+        category = self.category_filter.text().strip().lower()
+        priority = self.priority_filter.currentText()
+        person = self.person_filter.text().strip().lower()
+        search = self.search_edit.text().strip().lower()
+
+        result = []
+        for t in self.manager.all_topics():
+            if status != "All" and t.status != status:
+                continue
+            if priority != "All" and t.priority != priority:
+                continue
+            if category and category not in (t.category or "").lower():
+                continue
+            if person and person not in (t.asked_to or "").lower():
+                continue
+
+            haystack = " ".join([
+                t.question or "",
+                t.answer or "",
+            ]).lower()
+            if search and search not in haystack:
+                continue
+
+            result.append(t)
+        return result
+
+    # ---------------------- REFRESH TABLE ---------------------- #
+    def refresh(self):
+        topics = self.filtered_topics()
+        self.table.setRowCount(len(topics))
+
+        for row, t in enumerate(topics):
+            def fmt_date(iso_str):
+                if not iso_str:
+                    return ""
+                try:
+                    dt = datetime.fromisoformat(iso_str)
+                    return dt.strftime("%d.%m.%Y")
+                except Exception:
+                    return iso_str
+
+            values = [
+                t.question,
+                t.asked_to,
+                fmt_date(t.asked_at),
+                fmt_date(t.deadline),
+                t.status,
+                t.category,
+                t.priority,
+                t.channel,
+                fmt_date(t.reminder_date),
+                t.answer,
+            ]
+
+            for col, val in enumerate(values):
+                item = QTableWidgetItem(val or "")
+
+                # Overdue highlighting
+                if col == 3 and t.deadline:
+                    try:
+                        due = datetime.fromisoformat(t.deadline)
+                        if due.date() < datetime.now().date() and t.status != "answered":
+                            item.setForeground(Qt.red)
+                        elif due.date() <= datetime.now().date() and t.status != "answered":
+                            item.setForeground(QColor("#e67e22"))
+                    except Exception:
+                        pass
+
+                self.table.setItem(row, col, item)
+
+            # Store topic reference
+            self.table.item(row, 0).setData(Qt.UserRole, t)
+            self.table.setRowHeight(row, 26)
+
+        self.table.resizeColumnsToContents()
+
+    # ---------------------- GET CURRENT TOPIC ---------------------- #
+    def current_topic(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        item = self.table.item(row, 0)
+        if not item:
+            return None
+        return item.data(Qt.UserRole)
+
+    # ---------------------- NEW TOPIC ---------------------- #
+    def new_topic(self):
+        dlg = TopicDialog(self.manager, None, self)
+        if dlg.exec():
+            self.refresh()
+
+    # ---------------------- EDIT TOPIC ---------------------- #
+    def edit_selected_topic(self):
+        t = self.current_topic()
+        if not t:
+            return
+        dlg = TopicDialog(self.manager, t, self)
+        if dlg.exec():
+            self.refresh()
+
+    # ---------------------- DELETE TOPIC ---------------------- #
+    def delete_selected_topic(self):
+        topic = self.current_topic()
+        if not topic:
+            QMessageBox.warning(self, "No selection", "Please select a topic to delete.")
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Delete Topic",
+            "Are you sure you want to delete this topic?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if confirm == QMessageBox.Yes:
+            self.manager.delete_topic(topic)
+            self.table.clearSelection()
+            self.refresh()
+
+
 # ---------------------- Main window ---------------------- #
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.manager = TaskManager()
+        self.topic_manager = TopicManager()     # NEW
         self.setWindowTitle("Task Command Center")
         self.setMinimumSize(1100, 700)
         self.init_ui()
@@ -1774,13 +2357,15 @@ class MainWindow(QMainWindow):
         self.timeline_view = TimelineView(self.manager, self.refresh_all_views)
         self.archive_view = ArchiveView(self.manager)
         self.stats_view = StatisticsView(self.manager)
-        self.notes_view = NotesView()  # NEW
+        self.notes_view = NotesView()
+        self.topics_view = TopicsView(self.topic_manager)   
 
         self.stack.addWidget(self.matrix_view)     # index 0
         self.stack.addWidget(self.timeline_view)   # index 1
         self.stack.addWidget(self.archive_view)    # index 2
         self.stack.addWidget(self.stats_view)      # index 3
         self.stack.addWidget(self.notes_view)      # index 4
+        self.stack.addWidget(self.topics_view)     # index 5   
 
         self.setCentralWidget(self.stack)
 
@@ -1805,7 +2390,8 @@ class MainWindow(QMainWindow):
         add_nav_action("Timeline", 1)
         add_nav_action("Archive", 2)
         add_nav_action("Statistics", 3)
-        add_nav_action("Notes", 4)  # NEW
+        add_nav_action("Notes", 4)
+        add_nav_action("Topics", 5)   
 
         self.statusBar().showMessage("Ready")
         self.refresh_all_views()
@@ -1820,7 +2406,10 @@ class MainWindow(QMainWindow):
         self.timeline_view.refresh()
         self.archive_view.refresh()
         self.stats_view.refresh()
+        self.topics_view.refresh()     
         self.manager.save()
+        self.topic_manager.save()      
+
 
 # ---------------------- Entry point ---------------------- #
 
